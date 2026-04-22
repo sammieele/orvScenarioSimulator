@@ -1,0 +1,957 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ORV Scenario Simulator</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; background: #0a0a0f; overflow: hidden; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<!-- Load order follows dependency chain: data classes → data → systems → engine → entry point -->
+<script src="GameState.js"></script>
+<script src="Scenario.js"></script>
+<script src="scenarios.js"></script>
+<script src="ProbabilitySystem.js"></script>
+<script src="ConstellationSystem.js"></script>
+<script src="UIRenderer.js"></script>
+<script src="ScenarioEngine.js"></script>
+<script src="sketch.js"></script>
+<script>
+// Legacy inline content removed — all logic lives in the module files above.
+</script>
+<!--
+// =============================================================================
+// ORV SCENARIO SIMULATOR  —  ART 234 / Sammie Le
+// Single-file p5.js implementation of the approved pseudocode architecture.
+// All classes mirror the spec exactly; UI is rendered via p5 draw calls.
+// =============================================================================
+
+// ─── PALETTE ──────────────────────────────────────────────────────────────────
+const COL = {
+  bg:        '#0a0a0f',
+  panel:     '#12121a',
+  border:    '#2a2a3a',
+  accent:    '#7b6ef6',      // purple — primary accent
+  accentDim: '#3d3570',
+  gold:      '#c9a84c',      // constellation / warning
+  success:   '#4caf82',
+  danger:    '#e05c5c',
+  text:      '#e8e6f0',
+  textDim:   '#8880a8',
+  textMuted: '#4a4860',
+  trust:     '#4a9eff',
+  overlay:   'rgba(10,10,15,0.92)',
+};
+
+// ─── GAME STATE ───────────────────────────────────────────────────────────────
+class GameState {
+  constructor() { this.reset(); }
+
+  reset() {
+    this.scenarioIndex    = 0;
+    this.playerTraits     = { bravery: 0, empathy: 0, caution: 0 };
+    this.trustInSystem    = 50;          // neutral start (0–100)
+    this.probabilityBias  = 0;           // shifts actual probabilities
+    this.constellationFavor = 0;         // invisible audience score
+    this.flags            = {};          // named narrative booleans
+  }
+
+  updateTrait(traitName, amount) {
+    if (this.playerTraits[traitName] !== undefined) {
+      this.playerTraits[traitName] += amount;
+    }
+  }
+
+  setFlag(flagName, value) { this.flags[flagName] = value; }
+  getFlag(flagName)        { return this.flags[flagName] ?? false; }
+  advanceScenario()        { this.scenarioIndex++; }
+}
+
+// ─── SCENARIO & CHOICE ────────────────────────────────────────────────────────
+class Choice {
+  constructor(label, displayedProbability, actualProbability,
+              traitEffects, successText, failureText, flagToSet = null) {
+    this.label               = label;
+    this.displayedProbability = displayedProbability;
+    this.actualProbability    = actualProbability;
+    this.traitEffects         = traitEffects;   // [{ trait, amount }]
+    this.successText          = successText;
+    this.failureText          = failureText;
+    this.flagToSet            = flagToSet;       // { name, value } | null
+  }
+}
+
+class Scenario {
+  constructor(id, title, body, choices, requiredFlags = []) {
+    this.id            = id;
+    this.title         = title;
+    this.body          = body;
+    this.choices       = choices;
+    this.requiredFlags = requiredFlags;
+  }
+}
+
+// ─── PROBABILITY SYSTEM ───────────────────────────────────────────────────────
+class ProbabilitySystem {
+  modifyProbability(baseActual, gameState) {
+    let p = baseActual;
+    p += gameState.probabilityBias;
+    if (gameState.getFlag('acceptedPower')) p += 15;   // power boost
+    const favor = gameState.constellationFavor;
+    if (favor > 30)  p += 10;
+    else if (favor < -30) p -= 10;
+    return constrain(p, 0, 100);
+  }
+
+  rollOutcome(modifiedProbability) {
+    return (random() * 100) < modifiedProbability;
+  }
+
+  resolveChoice(choice, gameState) {
+    const modifiedActual = this.modifyProbability(choice.actualProbability, gameState);
+    const success        = this.rollOutcome(modifiedActual);
+    return { success, modifiedActual };
+  }
+
+  calculateTrustShift(displayedProbability, modifiedActualProbability) {
+    const diff = abs(displayedProbability - modifiedActualProbability);
+    if (diff > 30) return -15;
+    if (diff > 15) return -5;
+    return 1;   // tiny positive if system was honest
+  }
+}
+
+// ─── CONSTELLATION SYSTEM ─────────────────────────────────────────────────────
+class ConstellationSystem {
+  observeChoice(choice, gameState) {
+    // Identify dominant trait of this choice and adjust favor
+    let dominant = null;
+    let maxAbs = 0;
+    for (const fx of choice.traitEffects) {
+      if (abs(fx.amount) > maxAbs) { maxAbs = abs(fx.amount); dominant = fx.trait; }
+    }
+    if (dominant === 'empathy') gameState.constellationFavor += 5;
+    if (dominant === 'bravery') gameState.constellationFavor += 3;
+    if (dominant === 'caution') gameState.constellationFavor += 1;
+  }
+
+  injectEvent(gameState) {
+    if (gameState.constellationFavor > 30)  gameState.setFlag('constellationBoost',    true);
+    else if (gameState.constellationFavor < -30) gameState.setFlag('constellationSabotage', true);
+  }
+
+  applyFavorEffect(gameState) {
+    if (gameState.getFlag('constellationBoost')) {
+      gameState.probabilityBias += 10;
+      gameState.setFlag('constellationBoost', false);
+      return 'boost';
+    }
+    if (gameState.getFlag('constellationSabotage')) {
+      gameState.probabilityBias -= 10;
+      gameState.setFlag('constellationSabotage', false);
+      return 'sabotage';
+    }
+    return null;
+  }
+}
+
+// ─── SCENARIO LIST ────────────────────────────────────────────────────────────
+function buildScenarioList() {
+  return [
+    // ── Scenario 1: Bridge Collapse ──────────────────────────────────────────
+    new Scenario(
+      'bridge_collapse',
+      'Bridge Collapse',
+      'A decaying bridge spans the gap between you and safety.\nMonsters converge from behind. Every second costs lives.\nThe system offers you odds — but can you trust the numbers?',
+      [
+        new Choice(
+          'Run across immediately',
+          70, 50,
+          [{ trait: 'bravery', amount: 2 }],
+          'You sprint across. The bridge groans but holds. You make it — barely.',
+          'Halfway across, a plank gives way. You fall, dragged back. The monsters close in.',
+          null
+        ),
+        new Choice(
+          'Help another survivor cross',
+          40, 65,
+          [{ trait: 'empathy', amount: 3 }],
+          'Together you move faster than alone. The weight is shared. You both survive.',
+          'The added weight proves too much. The bridge collapses mid-span. Neither of you makes it.',
+          null
+        ),
+        new Choice(
+          'Search for another route',
+          60, 30,
+          [{ trait: 'caution', amount: 2 }],
+          'Against the odds, you find a hidden path. The monsters lose your trail.',
+          'The search wastes precious time. The route leads nowhere. The monsters find you.',
+          null
+        ),
+      ]
+    ),
+
+    // ── Scenario 2: Constellation Favor ──────────────────────────────────────
+    new Scenario(
+      'constellation_favor',
+      'Constellation Favor',
+      'A voice from beyond the veil. A constellation offers power—\nthe kind that tips every scale in your favor.\nBut nothing is given freely in this world.',
+      [
+        new Choice(
+          'Accept the power',
+          65, 80,
+          [{ trait: 'bravery', amount: 1 }, { trait: 'empathy', amount: -2 }],
+          'Power floods through you. The world tilts in your favor. Something is lost — you are not sure what yet.',
+          'The power overwhelms you. You lose control. The constellation watches, amused.',
+          { name: 'acceptedPower', value: true }
+        ),
+        new Choice(
+          'Refuse the offer',
+          50, 45,
+          [{ trait: 'caution', amount: 3 }],
+          'You step back from the offer. The constellation fades. You feel no different — but perhaps that is the point.',
+          'Your refusal is taken as weakness. The constellation withdraws all favor. The path ahead grows darker.',
+          null
+        ),
+        new Choice(
+          'Attempt to negotiate',
+          55, 50,  // random outcome — assumption: 50/50 as per design doc
+          [{ trait: 'empathy', amount: 1 }, { trait: 'caution', amount: 1 }],
+          'The constellation pauses. Terms are reached. You gain a fragment of power — on your own terms.',
+          'The constellation does not negotiate. Your attempt is dismissed. You leave with nothing.',
+          null
+        ),
+      ]
+    ),
+
+    // ── Scenario 3: Green Zone Betrayal ──────────────────────────────────────
+    new Scenario(
+      'green_zone',
+      'Green Zone Betrayal',
+      'The system marks this sector SAFE. 80% survival guaranteed.\nEvery display confirms it. Every indicator is green.\nSomething feels wrong.',
+      [
+        new Choice(
+          'Stay inside the zone',
+          80, 40,
+          [{ trait: 'caution', amount: -1 }],
+          'You trust the system. By pure chance, the guarantee holds — this time.',
+          'The guarantee was a lie. The zone collapses around you. The system offers no apology.',
+          null
+        ),
+        new Choice(
+          'Leave the zone early',
+          20, 65,
+          [{ trait: 'caution', amount: 3 }, { trait: 'bravery', amount: 1 }],
+          'Against all displayed odds you walk away. Outside, the zone detonates. Your instincts were right.',
+          'You break away — and walk straight into danger that the system never flagged.',
+          null
+        ),
+        new Choice(
+          'Test the boundary',
+          50, -1,  // -1 signals dynamic — resolved at runtime
+          [{ trait: 'empathy', amount: 1 }, { trait: 'caution', amount: 2 }],
+          'The boundary flickers. You document the inconsistency. Knowledge is its own kind of survival.',
+          'The test triggers an automated response. The zone locks down. You are inside when it does.',
+          null
+        ),
+      ]
+    ),
+
+    // ── Scenario 4: The Strongest Sacrifice ──────────────────────────────────
+    new Scenario(
+      'sacrifice',
+      'The Strongest Sacrifice',
+      'A wave of monsters approaches. The math is brutal:\nsomeone must stay behind to buy the others time.\nThe system tells you who has the best odds. Do you believe it?',
+      [
+        new Choice(
+          'Volunteer yourself',
+          20, 70,
+          [{ trait: 'bravery', amount: 4 }, { trait: 'empathy', amount: 2 }],
+          'You hold the line alone. Against every number, you survive. The others reach safety.',
+          'You hold as long as you can. It is not enough. But the others make it.',
+          null
+        ),
+        new Choice(
+          'Designate someone else',
+          70, 30,
+          [{ trait: 'empathy', amount: -3 }, { trait: 'bravery', amount: -1 }],
+          'The designated person is lost. You survive. The weight of that choice travels with you.',
+          'The person you chose cannot hold. The wave catches everyone. The system\'s confidence was empty.',
+          null
+        ),
+        new Choice(
+          'Look for another solution',
+          50, 50,  // outcome varies wildly per design doc — random modifier added below
+          [{ trait: 'caution', amount: 2 }, { trait: 'empathy', amount: 2 }],
+          'An improbable third option. A gap in the wave. Everyone moves — everyone survives.',
+          'There was no third option. The search cost precious seconds. The monsters reach you before the gate.',
+          null
+        ),
+      ]
+    ),
+  ];
+}
+
+// ─── UI RENDERER ──────────────────────────────────────────────────────────────
+// Knows nothing of game logic — only receives data and renders it.
+class UIRenderer {
+  constructor() {
+    this.typewriterText   = '';
+    this.typewriterTarget = '';
+    this.typewriterIndex  = 0;
+    this.typewriterTimer  = 0;
+    this.typewriterDone   = false;
+    this.typewriterSpeed  = 28;   // chars per second
+
+    this.buttons       = [];      // { label, prob, x, y, w, h, index, hovered }
+    this.onChoiceClick = null;    // callback(choiceIndex)
+
+    this.outcomeText    = '';
+    this.outcomeSuccess = false;
+    this.showingOutcome = false;
+    this.outcomeTimer   = 0;
+    this.outcomeDelay   = 3200;   // ms before auto-advance
+
+    this.systemMessage     = '';
+    this.showingSystemMsg  = false;
+    this.systemMsgTimer    = 0;
+    this.systemMsgDuration = 2800;
+
+    this.particlesStars = this._buildStars(120);
+    this.scrollOffset   = 0;       // future use
+  }
+
+  // ── Stars background ───────────────────────────────────────────────────────
+  _buildStars(count) {
+    return Array.from({ length: count }, () => ({
+      x: random(width), y: random(height),
+      r: random(0.5, 2.2),
+      phase: random(TWO_PI),
+      speed: random(0.3, 1.1),
+    }));
+  }
+
+  // ── Update typewriter each frame ───────────────────────────────────────────
+  updateTypewriter(dt) {
+    if (this.typewriterDone) return;
+    this.typewriterTimer += dt;
+    const interval = 1000 / this.typewriterSpeed;
+    while (this.typewriterTimer >= interval &&
+           this.typewriterIndex <= this.typewriterTarget.length) {
+      this.typewriterText = this.typewriterTarget.slice(0, this.typewriterIndex);
+      this.typewriterIndex++;
+      this.typewriterTimer -= interval;
+    }
+    if (this.typewriterIndex > this.typewriterTarget.length) this.typewriterDone = true;
+  }
+
+  // ── Update outcome timer ───────────────────────────────────────────────────
+  updateOutcome(dt) {
+    if (!this.showingOutcome) return;
+    this.outcomeTimer += dt;
+  }
+
+  updateSystemMsg(dt) {
+    if (!this.showingSystemMsg) return;
+    this.systemMsgTimer += dt;
+  }
+
+  isOutcomeExpired()   { return this.showingOutcome  && this.outcomeTimer  >= this.outcomeDelay; }
+  isSystemMsgExpired() { return this.showingSystemMsg && this.systemMsgTimer >= this.systemMsgDuration; }
+
+  // ── Main draw ──────────────────────────────────────────────────────────────
+  draw(gameState) {
+    this._drawBackground();
+    this._drawStars();
+    this._drawFrame();
+    this._drawHUD(gameState);
+    if (this.showingOutcome)    this._drawOutcome();
+    else if (this.showingSystemMsg) this._drawSystemMessage();
+    else                        this._drawNarrativeAndChoices();
+    this._drawScanlines();
+  }
+
+  // ── Background ─────────────────────────────────────────────────────────────
+  _drawBackground() {
+    background(COL.bg);
+    // Vignette
+    for (let i = 0; i < 8; i++) {
+      const alpha = map(i, 0, 8, 0, 80);
+      noFill();
+      stroke(0, 0, 0, alpha);
+      strokeWeight(40);
+      rect(i * 20, i * 20, width - i * 40, height - i * 40);
+    }
+    noStroke();
+  }
+
+  _drawStars() {
+    const t = millis() / 1000;
+    noStroke();
+    for (const s of this.particlesStars) {
+      const alpha = map(sin(s.phase + t * s.speed), -1, 1, 40, 180);
+      fill(red(color(COL.accent)), green(color(COL.accent)), blue(color(COL.accent)), alpha);
+      ellipse(s.x, s.y, s.r * 2);
+    }
+  }
+
+  _drawFrame() {
+    // Outer border
+    noFill();
+    stroke(COL.border);
+    strokeWeight(1);
+    rect(30, 30, width - 60, height - 60, 4);
+    // Corner accents
+    stroke(COL.accent);
+    strokeWeight(1.5);
+    const cs = 20;
+    const [x1, y1, x2, y2] = [30, 30, width - 30, height - 30];
+    line(x1, y1, x1 + cs, y1); line(x1, y1, x1, y1 + cs);
+    line(x2, y1, x2 - cs, y1); line(x2, y1, x2, y1 + cs);
+    line(x1, y2, x1 + cs, y2); line(x1, y2, x1, y2 - cs);
+    line(x2, y2, x2 - cs, y2); line(x2, y2, x2, y2 - cs);
+  }
+
+  _drawScanlines() {
+    // Subtle CRT scanline texture
+    noStroke();
+    for (let y = 0; y < height; y += 3) {
+      fill(0, 0, 0, 8);
+      rect(0, y, width, 1);
+    }
+  }
+
+  // ── HUD ────────────────────────────────────────────────────────────────────
+  _drawHUD(gs) {
+    const padL = 60, padR = width - 60;
+    const y = 54;
+
+    // Title label
+    textFont('monospace');
+    textSize(9);
+    fill(COL.textMuted);
+    noStroke();
+    text('[ ORV SCENARIO SIMULATOR ]', padL, y);
+
+    // Trust bar
+    const trustLabel = 'TRUST';
+    const barW = 120, barH = 6;
+    const barX = padR - barW - 60;
+    const barY = y - 6;
+    fill(COL.textMuted);
+    textSize(9);
+    textAlign(RIGHT);
+    text(trustLabel, barX - 8, y);
+    textAlign(LEFT);
+    noStroke();
+    fill(COL.border);
+    rect(barX, barY, barW, barH, 2);
+    const tColor = gs.trustInSystem > 60 ? COL.trust :
+                   gs.trustInSystem > 30 ? COL.gold  : COL.danger;
+    fill(tColor);
+    rect(barX, barY, barW * constrain(gs.trustInSystem / 100, 0, 1), barH, 2);
+
+    // Constellation favor dot
+    const favX = padR - 20, favY = y - 4;
+    const favColor = gs.constellationFavor > 20  ? COL.gold :
+                     gs.constellationFavor < -20 ? COL.danger : COL.textMuted;
+    fill(favColor);
+    ellipse(favX, favY, 8, 8);
+    stroke(favColor);
+    strokeWeight(0.5);
+    noFill();
+    ellipse(favX, favY, 14, 14);
+    noStroke();
+
+    // Traits
+    const traits = [
+      { k: 'bravery', label: 'BRV', col: COL.danger },
+      { k: 'empathy', label: 'EMP', col: COL.success },
+      { k: 'caution', label: 'CAU', col: COL.gold   },
+    ];
+    let tx = padL;
+    for (const tr of traits) {
+      fill(tr.col);
+      textSize(8);
+      textFont('monospace');
+      text(tr.label, tx, height - 42);
+      fill(COL.textDim);
+      textSize(9);
+      text(gs.playerTraits[tr.k] >= 0 ? '+' + gs.playerTraits[tr.k] : gs.playerTraits[tr.k], tx + 26, height - 42);
+      tx += 72;
+    }
+
+    // Scenario index
+    fill(COL.textMuted);
+    textAlign(RIGHT);
+    textSize(9);
+    text('SCENARIO ' + (gs.scenarioIndex + 1) + ' / 4', width - 60, height - 42);
+    textAlign(LEFT);
+    noStroke();
+  }
+
+  // ── Narrative + choices ────────────────────────────────────────────────────
+  renderNarrativeText(title, bodyText) {
+    this.typewriterTarget = bodyText;
+    this.typewriterText   = '';
+    this.typewriterIndex  = 0;
+    this.typewriterTimer  = 0;
+    this.typewriterDone   = false;
+    this._currentTitle    = title;
+  }
+
+  renderChoiceButtons(choiceList, onClickCb) {
+    this.buttons       = [];
+    this.onChoiceClick = onClickCb;
+
+    const n      = choiceList.length;
+    const btnW   = constrain(width - 160, 300, 680);
+    const btnH   = 62;
+    const gap    = 14;
+    const totalH = n * btnH + (n - 1) * gap;
+    const startY = height - 80 - totalH;
+    const startX = (width - btnW) / 2;
+
+    for (let i = 0; i < n; i++) {
+      this.buttons.push({
+        label: choiceList[i].label,
+        prob:  choiceList[i].displayedProbability,
+        x: startX,
+        y: startY + i * (btnH + gap),
+        w: btnW,
+        h: btnH,
+        index: i,
+        hovered: false,
+      });
+    }
+  }
+
+  _drawNarrativeAndChoices() {
+    const padL  = 80, padR = width - 80;
+    const textW = padR - padL;
+
+    // Scenario title
+    if (this._currentTitle) {
+      textFont('Georgia, serif');
+      textSize(22);
+      fill(COL.text);
+      noStroke();
+      textAlign(LEFT);
+      text(this._currentTitle, padL, 100);
+
+      stroke(COL.accentDim);
+      strokeWeight(1);
+      line(padL, 112, padL + 240, 112);
+      noStroke();
+    }
+
+    // Narrative body (typewriter)
+    textFont('Georgia, serif');
+    textSize(15);
+    fill(COL.textDim);
+    textAlign(LEFT);
+    textLeading(26);
+    text(this.typewriterText, padL, 136, textW, 220);
+
+    // Choice buttons
+    for (const btn of this.buttons) {
+      this._drawButton(btn);
+    }
+  }
+
+  _drawButton(btn) {
+    const hover  = btn.hovered;
+    const bgCol  = hover ? COL.accentDim : COL.panel;
+    const border = hover ? COL.accent    : COL.border;
+    const lw     = hover ? 1.5 : 0.8;
+
+    // Shadow
+    noStroke();
+    fill(0, 0, 0, 60);
+    rect(btn.x + 3, btn.y + 3, btn.w, btn.h, 4);
+
+    // Body
+    fill(bgCol);
+    stroke(border);
+    strokeWeight(lw);
+    rect(btn.x, btn.y, btn.w, btn.h, 4);
+    noStroke();
+
+    // Probability bar background
+    fill(COL.bg);
+    rect(btn.x + 12, btn.y + btn.h - 18, btn.w - 24, 7, 2);
+
+    // Probability bar fill
+    const probColor = btn.prob >= 60 ? COL.success :
+                      btn.prob >= 40 ? COL.gold    : COL.danger;
+    fill(probColor);
+    const fillW = (btn.w - 24) * (btn.prob / 100);
+    rect(btn.x + 12, btn.y + btn.h - 18, fillW, 7, 2);
+
+    // Label
+    textFont('Georgia, serif');
+    textSize(14);
+    fill(hover ? COL.text : COL.textDim);
+    textAlign(LEFT);
+    noStroke();
+    text(btn.label, btn.x + 16, btn.y + 24);
+
+    // Probability text
+    textFont('monospace');
+    textSize(10);
+    fill(probColor);
+    textAlign(RIGHT);
+    text(btn.prob + '%', btn.x + btn.w - 14, btn.y + 24);
+    textAlign(LEFT);
+  }
+
+  renderOutcome(outcomeText, wasSuccess) {
+    this.outcomeText    = outcomeText;
+    this.outcomeSuccess = wasSuccess;
+    this.showingOutcome = true;
+    this.outcomeTimer   = 0;
+    this.buttons        = [];
+  }
+
+  _drawOutcome() {
+    const cx = width / 2, cy = height / 2;
+
+    // Overlay panel
+    fill(COL.panel);
+    stroke(this.outcomeSuccess ? COL.success : COL.danger);
+    strokeWeight(1.5);
+    rect(80, cy - 120, width - 160, 240, 6);
+    noStroke();
+
+    // Status label
+    textFont('monospace');
+    textSize(11);
+    fill(this.outcomeSuccess ? COL.success : COL.danger);
+    textAlign(CENTER);
+    text(this.outcomeSuccess ? '[ SUCCESS ]' : '[ FAILURE ]', cx, cy - 80);
+
+    // Outcome text
+    textFont('Georgia, serif');
+    textSize(16);
+    fill(COL.text);
+    textAlign(CENTER);
+    textLeading(28);
+    text(this.outcomeText, cx, cy - 50, width - 200, 180);
+
+    // Countdown dots
+    const elapsed = this.outcomeTimer / this.outcomeDelay;
+    noFill();
+    stroke(COL.textMuted);
+    strokeWeight(0.8);
+    ellipse(cx, cy + 92, 60 + elapsed * 20, 60 + elapsed * 20);
+    fill(COL.textMuted);
+    noStroke();
+    textFont('monospace');
+    textSize(9);
+    text('CONTINUING...', cx, cy + 96);
+    textAlign(LEFT);
+  }
+
+  renderSystemMessage(messageText) {
+    this.systemMessage    = messageText;
+    this.showingSystemMsg = true;
+    this.systemMsgTimer   = 0;
+  }
+
+  _drawSystemMessage() {
+    const cx = width / 2, cy = height / 2;
+    const alpha = this.systemMsgTimer < 400
+      ? map(this.systemMsgTimer, 0, 400, 0, 255)
+      : this.systemMsgTimer > this.systemMsgDuration - 400
+        ? map(this.systemMsgTimer, this.systemMsgDuration - 400, this.systemMsgDuration, 255, 0)
+        : 255;
+
+    fill(0, 0, 0, alpha * 0.85);
+    rect(0, 0, width, height);
+
+    fill(red(color(COL.gold)), green(color(COL.gold)), blue(color(COL.gold)), alpha);
+    textFont('monospace');
+    textSize(11);
+    textAlign(CENTER);
+    text('[ CONSTELLATION EVENT ]', cx, cy - 30);
+
+    textFont('Georgia, serif');
+    textSize(18);
+    fill(red(color(COL.text)), green(color(COL.text)), blue(color(COL.text)), alpha);
+    text(this.systemMessage, cx, cy + 10, width - 200, 120);
+    textAlign(LEFT);
+  }
+
+  clearScreen() {
+    this.buttons          = [];
+    this._currentTitle    = '';
+    this.typewriterText   = '';
+    this.typewriterTarget = '';
+    this.typewriterDone   = false;
+    this.showingOutcome   = false;
+    this.showingSystemMsg = false;
+    this.outcomeTimer     = 0;
+    this.systemMsgTimer   = 0;
+  }
+
+  // ── Input handling ─────────────────────────────────────────────────────────
+  handleMouseMoved(mx, my) {
+    for (const btn of this.buttons) {
+      btn.hovered = (mx >= btn.x && mx <= btn.x + btn.w &&
+                     my >= btn.y && my <= btn.y + btn.h);
+    }
+  }
+
+  handleMouseClicked(mx, my) {
+    if (!this.onChoiceClick) return;
+    for (const btn of this.buttons) {
+      if (mx >= btn.x && mx <= btn.x + btn.w &&
+          my >= btn.y && my <= btn.y + btn.h) {
+        this.onChoiceClick(btn.index);
+        return;
+      }
+    }
+  }
+}
+
+// ─── SCENARIO ENGINE ──────────────────────────────────────────────────────────
+class ScenarioEngine {
+  constructor(gameState, scenarioList, probSystem, constSystem, uiRenderer) {
+    this.gameState       = gameState;
+    this.scenarioList    = scenarioList;
+    this.probSystem      = probSystem;
+    this.constSystem     = constSystem;
+    this.ui              = uiRenderer;
+    this.currentScenario = null;
+    this.state           = 'loading';   // loading | awaiting | resolving | advancing | end
+  }
+
+  loadScenario(index) {
+    if (index >= this.scenarioList.length) {
+      this.state = 'end';
+      return null;
+    }
+    let scenario = this.scenarioList[index];
+    // Skip if required flags not met (advance index and try next)
+    if (scenario.requiredFlags && scenario.requiredFlags.length > 0) {
+      const met = scenario.requiredFlags.every(f => this.gameState.getFlag(f));
+      if (!met) {
+        this.gameState.advanceScenario();
+        return this.loadScenario(index + 1);
+      }
+    }
+    return scenario;
+  }
+
+  presentScenario(scenario) {
+    this.currentScenario = scenario;
+    this.ui.renderNarrativeText(scenario.title, scenario.body);
+    this.ui.renderChoiceButtons(scenario.choices, (i) => this.handleChoice(i));
+    this.state = 'awaiting';
+  }
+
+  handleChoice(choiceIndex) {
+    if (this.state !== 'awaiting') return;
+    this.state = 'resolving';
+    const choice = this.currentScenario.choices[choiceIndex];
+
+    // ── Special case: "Test the boundary" dynamic probability ─────────────
+    // Assumption: actual = trust * 0.5 + constellationFavor * 0.3, clamped
+    if (choice.actualProbability === -1) {
+      choice.actualProbability = constrain(
+        this.gameState.trustInSystem * 0.5 + this.gameState.constellationFavor * 0.3,
+        5, 90
+      );
+    }
+    // ── "Look for another solution" wild variance ──────────────────────────
+    // Assumption: ±25 random swing on top of base 50
+    if (this.currentScenario.id === 'sacrifice' && choiceIndex === 2) {
+      choice.actualProbability = constrain(50 + random(-25, 25), 5, 95);
+    }
+
+    const { success, modifiedActual } = this.probSystem.resolveChoice(choice, this.gameState);
+
+    // Trust shift
+    const trustShift = this.probSystem.calculateTrustShift(
+      choice.displayedProbability, modifiedActual
+    );
+    this.gameState.trustInSystem = constrain(
+      this.gameState.trustInSystem + trustShift, 0, 100
+    );
+
+    // Trait effects
+    for (const fx of choice.traitEffects) {
+      this.gameState.updateTrait(fx.trait, fx.amount);
+    }
+
+    // Flags
+    if (choice.flagToSet) {
+      this.gameState.setFlag(choice.flagToSet.name, choice.flagToSet.value);
+    }
+
+    // Constellation
+    this.constSystem.observeChoice(choice, this.gameState);
+    this.constSystem.injectEvent(this.gameState);
+
+    const outcomeText = success ? choice.successText : choice.failureText;
+    this.ui.renderOutcome(outcomeText, success);
+    this.ui.buttons = [];   // hide choice buttons while showing outcome
+  }
+
+  advanceToNextScenario() {
+    this.state = 'advancing';
+    this.gameState.advanceScenario();
+
+    const effect = this.constSystem.applyFavorEffect(this.gameState);
+    if (effect) {
+      const msg = effect === 'boost'
+        ? 'The constellation tilts the scales in your favor.'
+        : 'The constellation withdraws its blessing. The odds grow heavier.';
+      this.ui.clearScreen();
+      this.ui.renderSystemMessage(msg);
+      this.state = 'system_msg';
+    } else {
+      this._doLoad();
+    }
+  }
+
+  finishSystemMsg() {
+    this._doLoad();
+  }
+
+  _doLoad() {
+    const next = this.loadScenario(this.gameState.scenarioIndex);
+    if (!next) { this.state = 'end'; return; }
+    this.ui.clearScreen();
+    this.presentScenario(next);
+  }
+}
+
+// ─── END SCREEN ───────────────────────────────────────────────────────────────
+function drawEndScreen(gs) {
+  const cx = width / 2, cy = height / 2;
+  background(COL.bg);
+
+  fill(COL.accentDim);
+  noStroke();
+  ellipse(cx, cy, 420, 420);
+  fill(COL.bg);
+  ellipse(cx, cy, 400, 400);
+
+  textFont('Georgia, serif');
+  textSize(26);
+  fill(COL.text);
+  textAlign(CENTER);
+  text('All scenarios exhausted.', cx, cy - 80);
+
+  textFont('monospace');
+  textSize(11);
+  fill(COL.textDim);
+  textAlign(CENTER);
+
+  const traits = gs.playerTraits;
+  text('BRAVERY  ' + (traits.bravery  >= 0 ? '+' : '') + traits.bravery,  cx, cy - 30);
+  text('EMPATHY  ' + (traits.empathy  >= 0 ? '+' : '') + traits.empathy,  cx, cy - 10);
+  text('CAUTION  ' + (traits.caution  >= 0 ? '+' : '') + traits.caution,  cx, cy + 10);
+  text('TRUST IN SYSTEM  ' + gs.trustInSystem.toFixed(0) + '%', cx, cy + 40);
+  text('CONSTELLATION FAVOR  ' + gs.constellationFavor, cx, cy + 60);
+  if (gs.getFlag('acceptedPower')) {
+    fill(COL.gold);
+    text('[ POWER ACCEPTED ]', cx, cy + 90);
+  }
+
+  fill(COL.textMuted);
+  textSize(10);
+  text('press R to restart', cx, cy + 140);
+  textAlign(LEFT);
+}
+
+// ─── GLOBAL SETUP ─────────────────────────────────────────────────────────────
+let gameState, scenarioList, probSystem, constSystem, uiRenderer, engine;
+
+function initGame() {
+  gameState    = new GameState();
+  scenarioList = buildScenarioList();
+  probSystem   = new ProbabilitySystem();
+  constSystem  = new ConstellationSystem();
+  uiRenderer   = new UIRenderer();
+  engine       = new ScenarioEngine(gameState, scenarioList, probSystem, constSystem, uiRenderer);
+
+  const first = engine.loadScenario(0);
+  if (first) engine.presentScenario(first);
+}
+
+// ─── P5.JS ENTRY POINTS ───────────────────────────────────────────────────────
+function setup() {
+  const cnv = createCanvas(windowWidth, windowHeight);
+  cnv.style('display', 'block');
+  frameRate(60);
+  textFont('Georgia, serif');
+  initGame();
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+  uiRenderer.particlesStars = uiRenderer._buildStars(120);
+  // Rebuild buttons for new layout
+  if (engine.currentScenario && engine.state === 'awaiting') {
+    uiRenderer.renderChoiceButtons(
+      engine.currentScenario.choices,
+      (i) => engine.handleChoice(i)
+    );
+  }
+}
+
+function draw() {
+  const dt = deltaTime;  // ms since last frame
+
+  if (engine.state === 'end') {
+    drawEndScreen(gameState);
+    return;
+  }
+
+  // Update animated subsystems
+  uiRenderer.updateTypewriter(dt);
+  uiRenderer.updateOutcome(dt);
+  uiRenderer.updateSystemMsg(dt);
+
+  // Advance after outcome display
+  if (uiRenderer.isOutcomeExpired()) {
+    uiRenderer.showingOutcome = false;
+    engine.advanceToNextScenario();
+  }
+
+  // Advance after system message
+  if (engine.state === 'system_msg' && uiRenderer.isSystemMsgExpired()) {
+    uiRenderer.showingSystemMsg = false;
+    engine.finishSystemMsg();
+  }
+
+  uiRenderer.draw(gameState);
+}
+
+function mouseMoved() {
+  if (uiRenderer) uiRenderer.handleMouseMoved(mouseX, mouseY);
+}
+
+function mouseClicked() {
+  if (uiRenderer) uiRenderer.handleMouseClicked(mouseX, mouseY);
+}
+
+function keyPressed() {
+  if (key === 'r' || key === 'R') initGame();
+  // Skip typewriter on spacebar
+  if (key === ' ' && uiRenderer && !uiRenderer.typewriterDone) {
+    uiRenderer.typewriterText  = uiRenderer.typewriterTarget;
+    uiRenderer.typewriterDone  = true;
+    uiRenderer.typewriterIndex = uiRenderer.typewriterTarget.length + 1;
+  }
+}
+-->
+</body>
+</html>
