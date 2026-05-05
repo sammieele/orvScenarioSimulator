@@ -19,26 +19,41 @@ const COL = {
 
 class UIRenderer {
   constructor() {
+    // — Timing (ms unless noted) —
+    this.typewriterSpeed    = 28;   // chars/sec
+    this.choiceDelayMs      = 800;
+    this.choiceFadeSpeed    = 520;
+    this.outcomeDelay       = 4500;
+    this.systemMsgDuration  = 4000;
+    this.conclusionSpeed    = 30;   // chars/sec
+
     this.typewriterText   = '';
     this.typewriterTarget = '';
     this.typewriterIndex  = 0;
     this.typewriterTimer  = 0;
     this.typewriterDone   = false;
-    this.typewriterSpeed  = 28;   // chars per second
 
     this.buttons       = [];      // { label, prob, x, y, w, h, index, hovered }
+    this.pendingChoices = null;
     this.onChoiceClick = null;    // callback(choiceIndex)
+    this.choiceDelayTimer = 0;
+    this.choiceAlpha      = 0;
 
     this.outcomeText    = '';
     this.outcomeSuccess = false;
     this.showingOutcome = false;
     this.outcomeTimer   = 0;
-    this.outcomeDelay   = 4200;
 
     this.systemMessage     = '';
     this.showingSystemMsg  = false;
     this.systemMsgTimer    = 0;
-    this.systemMsgDuration = 2800;
+
+    this.conclusionText      = '';
+    this.conclusionTypedText = '';
+    this.conclusionIndex     = 0;
+    this.conclusionTimer     = 0;
+    this.conclusionDone      = false;
+    this.showingConclusion   = false;
 
     this.particlesStars = this._buildStars(120);
     this.constellations = this._buildConstellations(6);
@@ -51,7 +66,7 @@ class UIRenderer {
       lineSpacing: 26,
       choiceSpacing: 14,
       titleSize: 22,
-      bodyTextSize: 15,
+      bodyTextSize: 16,
       titleUnderlineGap: 12,
       bodyToChoicesGap: 20,
       choiceHeight: 52,
@@ -114,16 +129,29 @@ class UIRenderer {
   }
 
   updateTypewriter(dt) {
-    if (this.typewriterDone) return;
-    this.typewriterTimer += dt;
-    const interval = 1000 / this.typewriterSpeed;
-    while (this.typewriterTimer >= interval &&
-           this.typewriterIndex <= this.typewriterTarget.length) {
-      this.typewriterText = this.typewriterTarget.slice(0, this.typewriterIndex);
-      this.typewriterIndex++;
-      this.typewriterTimer -= interval;
+    if (!this.typewriterDone) {
+      this.typewriterTimer += dt;
+      const interval = 1000 / this.typewriterSpeed;
+      while (this.typewriterTimer >= interval &&
+             this.typewriterIndex <= this.typewriterTarget.length) {
+        this.typewriterText = this.typewriterTarget.slice(0, this.typewriterIndex);
+        this.typewriterIndex++;
+        this.typewriterTimer -= interval;
+      }
+      if (this.typewriterIndex > this.typewriterTarget.length) {
+        this.typewriterDone = true;
+        this.choiceDelayTimer = 0;
+      }
     }
-    if (this.typewriterIndex > this.typewriterTarget.length) this.typewriterDone = true;
+
+    if (this.typewriterDone && this.buttons.length === 0 && this.pendingChoices && this.pendingChoices.length > 0) {
+      this.choiceDelayTimer += dt;
+      if (this.choiceDelayTimer >= this.choiceDelayMs) this._buildChoiceButtons();
+    }
+
+    if (this.buttons.length > 0 && this.choiceAlpha < 255) {
+      this.choiceAlpha = min(255, this.choiceAlpha + this.choiceFadeSpeed * (dt / 1000));
+    }
   }
 
   updateOutcome(dt) {
@@ -132,6 +160,19 @@ class UIRenderer {
 
   updateSystemMsg(dt) {
     if (this.showingSystemMsg) this.systemMsgTimer += dt;
+  }
+
+  updateConclusion(dt) {
+    if (!this.showingConclusion || this.conclusionDone) return;
+    this.conclusionTimer += dt;
+    const interval = 1000 / this.conclusionSpeed;
+    while (this.conclusionTimer >= interval &&
+           this.conclusionIndex <= this.conclusionText.length) {
+      this.conclusionTypedText = this.conclusionText.slice(0, this.conclusionIndex);
+      this.conclusionIndex++;
+      this.conclusionTimer -= interval;
+    }
+    if (this.conclusionIndex > this.conclusionText.length) this.conclusionDone = true;
   }
 
   isOutcomeExpired()   { return this.showingOutcome   && this.outcomeTimer   >= this.outcomeDelay; }
@@ -144,6 +185,7 @@ class UIRenderer {
     this._drawHUD(gameState);
     if (this.showingOutcome)        this._drawOutcome();
     else if (this.showingSystemMsg) this._drawSystemMessage();
+    else if (this.showingConclusion) this._drawConclusion();
     else                            this._drawNarrativeAndChoices();
     this._drawScanlines();
   }
@@ -261,12 +303,12 @@ class UIRenderer {
     let tx = padL;
     for (const tr of traits) {
       fill(tr.col);
-      textSize(8);
+      textSize(10);
       textFont('monospace');
-      text(tr.label, tx, height - 42);
+      text(tr.label, tx, height - 50);
       fill(COL.textDim);
-      textSize(9);
-      text(gs.playerTraits[tr.k] >= 0 ? '+' + gs.playerTraits[tr.k] : gs.playerTraits[tr.k], tx + 26, height - 42);
+      textSize(11);
+      text(gs.playerTraits[tr.k] >= 0 ? '+' + gs.playerTraits[tr.k] : gs.playerTraits[tr.k], tx + 26, height - 50);
       tx += 72;
     }
 
@@ -274,7 +316,7 @@ class UIRenderer {
     fill(COL.textMuted);
     textAlign(RIGHT);
     textSize(9);
-    text('SCENARIO ' + (gs.scenarioIndex + 1) + ' / 4', width - 60, height - 42);
+    text('SCENARIO ' + (gs.scenarioIndex + 1) + ' / ' + SCENARIOS.length, width - 60, height - 50);
     textAlign(LEFT);
     noStroke();
   }
@@ -286,18 +328,33 @@ class UIRenderer {
     this.typewriterIndex  = 0;
     this.typewriterTimer  = 0;
     this.typewriterDone   = false;
+    this.choiceDelayTimer = 0;
+    this.choiceAlpha      = 0;
   }
 
   renderChoiceButtons(choiceList, onClickCb) {
-    this.buttons       = [];
-    this.onChoiceClick = onClickCb;
+    this.buttons        = [];
+    this.onChoiceClick  = onClickCb;
+    this.choiceAlpha    = 0;
+    this.choiceDelayTimer = 0;
+    this.pendingChoices = Array.isArray(choiceList)
+      ? choiceList.map((choice) => ({
+          label: choice.label,
+          displayProbability: choice.displayProbability,
+        }))
+      : [];
+  }
 
-    const layout = this._getNarrativeLayout(choiceList.length);
+  _buildChoiceButtons() {
+    if (!this.pendingChoices || this.pendingChoices.length === 0) return;
 
-    for (let i = 0; i < choiceList.length; i++) {
+    this.buttons = [];
+    const layout = this._getNarrativeLayout(this.pendingChoices.length);
+
+    for (let i = 0; i < this.pendingChoices.length; i++) {
       this.buttons.push({
-        label:   choiceList[i].label,
-        prob:    choiceList[i].displayProbability,
+        label:   this.pendingChoices[i].label,
+        prob:    this.pendingChoices[i].displayProbability,
         x:       layout.buttonsX,
         y:       layout.buttonsY + i * (layout.buttonH + layout.choiceGap),
         w:       layout.buttonW,
@@ -306,6 +363,19 @@ class UIRenderer {
         hovered: false,
       });
     }
+
+    this.pendingChoices = null;
+  }
+
+  skipChoiceDelay() {
+    if (!this.typewriterDone) return false;
+    if (this.buttons.length > 0) return false;
+    if (!this.pendingChoices || this.pendingChoices.length === 0) return false;
+
+    this.choiceDelayTimer = this.choiceDelayMs;
+    this._buildChoiceButtons();
+    this.choiceAlpha = 255;
+    return true;
   }
 
   _drawNarrativeAndChoices() {
@@ -323,15 +393,27 @@ class UIRenderer {
       noStroke();
     }
 
+    fill(COL.text);
+    noStroke();
+    textAlign(LEFT);
     textFont('Georgia, serif');
     textSize(this.layout.bodyTextSize);
-    fill(COL.text);
-    textAlign(LEFT);
     textLeading(this.layout.lineSpacing);
     text(layout.displayBodyText, layout.promptTextX, layout.promptTextY, layout.promptTextW, layout.promptTextH);
 
+    if (!this.typewriterDone && floor(millis() / 600) % 2 === 0) {
+      push();
+      noStroke();
+      fill(180, 200, 220, 160);
+      textFont('monospace');
+      textSize(10);
+      textAlign(RIGHT, BASELINE);
+      text('[ SPACE — SKIP ]', layout.panelX + layout.panelW - 22, layout.panelY + layout.panelH - 14);
+      pop();
+    }
+
     for (const btn of this.buttons) {
-      this._drawButton(btn);
+      this._drawButton(btn, this.choiceAlpha);
     }
   }
 
@@ -662,7 +744,10 @@ class UIRenderer {
     }
   }
 
-  _drawButton(btn) {
+  _drawButton(btn, alpha = 255) {
+    push();
+    drawingContext.globalAlpha = constrain(alpha / 255, 0, 1);
+
     const hover  = btn.hovered;
     const labelColor = color(220, 230, 255);
     const buttonBg = color(18, 18, 28);
@@ -697,7 +782,7 @@ class UIRenderer {
     rect(trackX, trackY, trackW * (btn.prob / 100), 7, 2);
 
     textFont('Georgia, serif');
-    textSize(14);
+    textSize(15);
     fill(labelColor);
     textAlign(LEFT, CENTER);
     noStroke();
@@ -709,10 +794,13 @@ class UIRenderer {
     textAlign(RIGHT, CENTER);
     text(btn.prob + '%', btn.x + btn.w - 14, textY);
     textAlign(LEFT);
+
+    pop();
   }
 
   renderOutcome(outcomeText, wasSuccess) {
     this.outcomeText    = this._normalizeOverlayText(outcomeText);
+    this.outcomeDelay   = max(3500, this.outcomeText.length * 55);
     this.outcomeSuccess = wasSuccess;
     this.showingOutcome = true;
     this.outcomeTimer   = 0;
@@ -797,6 +885,23 @@ class UIRenderer {
     this.systemMsgTimer   = 0;
   }
 
+  renderConclusion(text) {
+    this.showingConclusion = true;
+    this.conclusionText = String(text || '').trim();
+    this.conclusionTypedText = '';
+    this.conclusionIndex = 0;
+    this.conclusionTimer = 0;
+    this.conclusionDone = false;
+  }
+
+  skipConclusionTypewriter() {
+    if (!this.showingConclusion || this.conclusionDone) return false;
+    this.conclusionTypedText = this.conclusionText;
+    this.conclusionIndex = this.conclusionText.length + 1;
+    this.conclusionDone = true;
+    return true;
+  }
+
   _drawSystemMessage() {
     const cx = width / 2, cy = height / 2;
     const alpha = this.systemMsgTimer < 400
@@ -814,23 +919,126 @@ class UIRenderer {
     textAlign(CENTER);
     text('[ CONSTELLATION EVENT ]', cx, cy - 30);
 
-    textFont('Georgia, serif');
+    textFont('monospace');
     textSize(18);
     fill(red(color(COL.text)), green(color(COL.text)), blue(color(COL.text)), alpha);
     text(this.systemMessage, cx, cy + 10, width - 200, 120);
     textAlign(LEFT);
   }
 
+  _drawConclusion() {
+    const cx = width / 2;
+    const marginX = max(60, width * 0.08);
+    const panelW  = width - marginX * 2;
+    const panelH  = min(height - 120, max(330, height * 0.58));
+    const panelX  = (width - panelW) / 2;
+    const panelY  = (height - panelH) / 2;
+    const panelR  = this.layout.panelRadius;
+    const sideTabW = 16;
+    const sideTabH = 30;
+    const midY    = panelY + panelH / 2;
+
+    noStroke();
+    fill(100, 210, 255, 72);
+    rect(panelX, panelY, panelW, panelH, panelR);
+    fill(130, 225, 255, 22);
+    rect(panelX + 3, panelY + 3, panelW - 6, panelH - 6, max(0, panelR - 2));
+
+    fill(255, 255, 255, 10);
+    ellipse(panelX + panelW * 0.2, panelY + panelH * 0.2, panelW * 0.28, panelH * 0.45);
+    fill(255, 255, 255, 6);
+    ellipse(panelX + panelW * 0.24, panelY + panelH * 0.18, panelW * 0.18, panelH * 0.22);
+
+    fill(110, 220, 255, 28);
+    rect(panelX - sideTabW + 4, midY - sideTabH / 2, sideTabW, sideTabH, 7);
+    rect(panelX + panelW - 4, midY - sideTabH / 2, sideTabW, sideTabH, 7);
+
+    noFill();
+    stroke(160, 235, 255, 36);
+    strokeWeight(4);
+    rect(panelX - 1, panelY - 1, panelW + 2, panelH + 2, panelR + 1);
+    stroke(235, 250, 255, 110);
+    strokeWeight(1.4);
+    rect(panelX, panelY, panelW, panelH, panelR);
+    stroke(170, 235, 255, 42);
+    strokeWeight(0.9);
+    rect(panelX + 5, panelY + 5, panelW - 10, panelH - 10, max(0, panelR - 3));
+    noStroke();
+
+    textFont('monospace');
+    textSize(11);
+    fill(220, 230, 255, 200);
+    textAlign(CENTER);
+    text('[ FINAL RECORD ]', cx, panelY + 34);
+
+    stroke(160, 235, 255, 50);
+    strokeWeight(0.8);
+    line(panelX + 32, panelY + 44, panelX + panelW - 32, panelY + 44);
+    noStroke();
+
+    const titleText = 'EPILOGUE';
+    textFont('Georgia, serif');
+    textSize(min(28, width * 0.038));
+    textAlign(CENTER);
+    fill(180, 220, 255, 18);
+    text(titleText, cx - 2, panelY + 76);
+    text(titleText, cx + 2, panelY + 76);
+    text(titleText, cx, panelY + 74);
+    text(titleText, cx, panelY + 78);
+    fill(200, 230, 255, 38);
+    text(titleText, cx - 1, panelY + 76);
+    text(titleText, cx + 1, panelY + 76);
+    fill(240, 248, 255, 255);
+    text(titleText, cx, panelY + 76);
+
+    const starY = panelY + 90;
+    this._drawFourPointStar(cx, starY, 4.5, 160);
+    this._drawFourPointStar(cx - 22, starY, 2.8, 100);
+    this._drawFourPointStar(cx + 22, starY, 2.8, 100);
+
+    const bodyPadX   = max(40, panelW * 0.1);
+    const bodyX      = panelX + bodyPadX;
+    const bodyW      = panelW - bodyPadX * 2;
+    const bodyStartY = panelY + 112;
+
+    noStroke();
+    textFont('Georgia, serif');
+    textSize(15);
+    fill(COL.text);
+    textAlign(CENTER, TOP);
+    textLeading(26);
+    text(this.conclusionTypedText, bodyX, bodyStartY, bodyW, panelH - 185);
+
+    if (this.conclusionDone && floor(millis() / 600) % 2 === 0) {
+      fill(180, 200, 220, 255);
+      textFont('monospace');
+      textSize(11);
+      textAlign(CENTER);
+      text('CLICK OR PRESS ENTER FOR STATS', cx, panelY + panelH - 28);
+    }
+
+    textAlign(LEFT);
+  }
+
   clearScreen() {
     this.buttons          = [];
+    this.pendingChoices   = null;
     this._currentTitle    = '';
     this.typewriterText   = '';
     this.typewriterTarget = '';
     this.typewriterDone   = false;
+    this.choiceDelayTimer = 0;
+    this.choiceAlpha      = 0;
     this.showingOutcome   = false;
     this.showingSystemMsg = false;
+    this.showingConclusion = false;
     this.outcomeTimer     = 0;
     this.systemMsgTimer   = 0;
+    this.conclusionText      = '';
+    this.conclusionTypedText = '';
+    this.conclusionIndex     = 0;
+    this.conclusionTimer     = 0;
+    this.conclusionDone      = false;
   }
 
   handleMouseMoved(mx, my) {

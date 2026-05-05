@@ -21,7 +21,6 @@ function initGame() {
   startTypewriterTimer  = 0;
   startTypewriterDone   = false;
   startScreenPage       = 0;
-
   gameState   = new GameState();
   probSystem  = new ProbabilitySystem();
   constSystem = new ConstellationSystem();
@@ -49,12 +48,7 @@ function setup() {
 function windowResized() {
   resizeCanvas(windowWidth, windowHeight);
   uiRenderer.particlesStars = uiRenderer._buildStars(120);
-  if (engine.currentScenario && engine.state === 'awaiting') {
-    uiRenderer.renderChoiceButtons(
-      engine.currentScenario.choices,
-      (i) => engine.handleChoice(i)
-    );
-  }
+  uiRenderer.constellations = uiRenderer._buildConstellations(6);
 }
 
 function draw() {
@@ -74,6 +68,7 @@ function draw() {
   uiRenderer.updateTypewriter(dt);
   uiRenderer.updateOutcome(dt);
   uiRenderer.updateSystemMsg(dt);
+  uiRenderer.updateConclusion(dt);
 
   if (uiRenderer.isOutcomeExpired()) {
     uiRenderer.showingOutcome = false;
@@ -102,6 +97,18 @@ function mouseClicked() {
     }
     return;
   }
+  if (engine && engine.state === 'conclusion') {
+    if (!uiRenderer.conclusionDone) {
+      uiRenderer.skipConclusionTypewriter();
+    } else {
+      engine.advanceFromConclusion();
+    }
+    return;
+  }
+  if (engine && engine.state === 'resolving' && uiRenderer.showingOutcome) {
+    uiRenderer.outcomeTimer = uiRenderer.outcomeDelay; // force expiry on click
+    return;
+  }
   if (uiRenderer) uiRenderer.handleMouseClicked(mouseX, mouseY);
 }
 
@@ -121,10 +128,25 @@ function keyPressed() {
     }
     return;
   }
-  if (key === ' ' && uiRenderer && !uiRenderer.typewriterDone) {
-    uiRenderer.typewriterText  = uiRenderer.typewriterTarget;
-    uiRenderer.typewriterDone  = true;
-    uiRenderer.typewriterIndex = uiRenderer.typewriterTarget.length + 1;
+  if (engine && engine.state === 'conclusion') {
+    if (key === 'Enter' || key === ' ') {
+      if (!uiRenderer.conclusionDone) {
+        uiRenderer.skipConclusionTypewriter();
+      } else {
+        engine.advanceFromConclusion();
+      }
+    }
+    return;
+  }
+  if (key === ' ' && uiRenderer) {
+    if (!uiRenderer.typewriterDone) {
+      uiRenderer.typewriterText  = uiRenderer.typewriterTarget;
+      uiRenderer.typewriterDone  = true;
+      uiRenderer.typewriterIndex = uiRenderer.typewriterTarget.length + 1;
+      uiRenderer.choiceDelayTimer = 0;
+    } else {
+      uiRenderer.skipChoiceDelay();
+    }
   }
 }
 
@@ -295,9 +317,9 @@ function _drawStartScreen() {
     text('SUCCESS %', blockX, hy);
     hy += lh - 4;
     fill(170, 195, 220, 180);
-    text("The system's prediction for each choice.", blockX, hy);
+    text("The % shown is what the System tells you.", blockX, hy);
     hy += lh - 4;
-    text("Trust it — or don't.", blockX, hy);
+    text("The real odds are hidden. Trust the numbers — or don't.", blockX, hy);
     hy += lh + gap;
 
     fill(160, 210, 255, 180);
